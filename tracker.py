@@ -45,10 +45,15 @@ with st.container():
         unsafe_allow_html=True
     )
 
-# center the uploader under the splash
+# center the uploader under the splash, with a hidden non-empty label
 col1, col2, col3 = st.columns([1, 2, 1])
 with col2:
-    uploaded = st.file_uploader("", type="csv", accept_multiple_files=True)
+    uploaded = st.file_uploader(
+        label="Upload CSV",
+        type="csv",
+        accept_multiple_files=True,
+        label_visibility="hidden"
+    )
 
 # if no files yet, stop here
 if not uploaded:
@@ -169,25 +174,24 @@ excel_bytes = excel_buffer.getvalue()
 
 # ── 9) PDF export function ─────────────────────────────────────────────────
 def create_pdf(opts_df, chart_df, month_order, tax_rate, tax_rate_pct):
+    # Use tight_layout for PDF to avoid layoutgrid warning
     fig = plt.figure(figsize=(8,10), facecolor='white')
     today = datetime.date.today()
     suf = "th" if 11 <= today.day % 100 <= 13 else {1: "st", 2: "nd", 3: "rd"}.get(today.day % 10, "th")
     date_str = today.strftime(f"%B {today.day}{suf}, %Y")
 
+    # Header
     ax1 = fig.add_axes([0.1, 0.82, 0.8, 0.16])
     ax1.axis('off')
     ax1.text(0.5, 0.75,
              "Year-to-Date Options Income Summary",
              ha='center', va='center',
-             fontsize=14,
-             fontfamily='Times New Roman',
-             fontweight='bold',
-             color='black')
+             fontsize=14, fontfamily='Times New Roman',
+             fontweight='bold', color='black')
     ax1.text(0.5, 0.62,
              date_str,
              ha='center', va='center',
-             fontsize=14,
-             fontfamily='Times New Roman',
+             fontsize=14, fontfamily='Times New Roman',
              color='black')
 
     stats = [
@@ -196,23 +200,20 @@ def create_pdf(opts_df, chart_df, month_order, tax_rate, tax_rate_pct):
         (f"Tax Expense ({tax_rate_pct}%):", f"-${tax_e:,.1f}"),
         ("YTD Post-Tax Gain:",       f"${post_tax:,.1f}")
     ]
-
     for i, (lbl, val) in enumerate(stats):
         y = 0.44 - i * 0.10
         ax1.text(0.48, y,
                  lbl,
                  ha='right', va='center',
-                 fontsize=14,
-                 fontfamily='Times New Roman',
-                 fontweight='bold',
-                 color='black')
+                 fontsize=14, fontfamily='Times New Roman',
+                 fontweight='bold', color='black')
         ax1.text(0.52, y,
                  val,
                  ha='left', va='center',
-                 fontsize=14,
-                 fontfamily='Times New Roman',
+                 fontsize=14, fontfamily='Times New Roman',
                  color='black')
 
+    # Bar chart
     ax2 = fig.add_axes([0.1, 0.25, 0.8, 0.45])
     df2 = chart_df.set_index('MonthLabel').reindex(month_order)
 
@@ -220,53 +221,37 @@ def create_pdf(opts_df, chart_df, month_order, tax_rate, tax_rate_pct):
     outline_color = (55/255,  86/255,  35/255)
 
     bars = ax2.bar(df2.index, df2['PreTaxProfit'],
-                   color=fill_color,
-                   edgecolor=outline_color,
-                   linewidth=1.5)
+                   color=fill_color, edgecolor=outline_color, linewidth=1.5)
     for bar in bars:
         h = bar.get_height()
-        ax2.text(
-            bar.get_x() + bar.get_width()/2,
-            h/2,
-            f"${h:,.1f}",
-            ha='center',
-            va='center',
-            color=outline_color,
-            fontfamily='Arial',
-            fontsize=12
-        )
+        ax2.text(bar.get_x() + bar.get_width()/2,
+                 h/2,
+                 f"${h:,.1f}",
+                 ha='center', va='center',
+                 color=outline_color, fontfamily='Arial', fontsize=12)
 
     ax2.set_ylim(0, df2['PreTaxProfit'].max() * 1.1)
     ax2.set_title("Monthly P&L Exhibit:",
-                  fontfamily='Times New Roman',
-                  fontsize=14,
-                  color='black',
-                  pad=12)
+                  fontfamily='Times New Roman', fontsize=14,
+                  color='black', pad=12)
     ax2.set_ylabel("Pre-Tax Profit",
-                   fontfamily='Arial',
-                   fontsize=12,
-                   color='black')
+                   fontfamily='Arial', fontsize=12, color='black')
     ax2.yaxis.set_ticks([0])
-
     for spine in ['top','right']:
         ax2.spines[spine].set_visible(False)
     ax2.spines['left'].set_color('black')
     ax2.spines['bottom'].set_color('black')
-    ax2.tick_params(axis='y', left=False, labelleft=False)
-    ax2.tick_params(axis='x',
-                    colors='black',
-                    labelrotation=45,
-                    labelsize=12)
-    ax2.set_xticklabels(month_order,
-                        ha='right',
-                        fontfamily='Arial',
-                        fontsize=12)
+
+    # Explicit ticks & tight layout
+    ax2.set_xticks(range(len(month_order)))
+    ax2.set_xticklabels(month_order, rotation=45,
+                        ha='right', fontfamily='Arial', fontsize=12)
 
     fig.tight_layout(pad=2)
 
     buf = io.BytesIO()
     with PdfPages(buf) as pdf:
-        pdf.savefig(fig, facecolor='white')
+        pdf.savefig(fig, facecolor='white', bbox_inches='tight')
     buf.seek(0)
     plt.close(fig)
     return buf.getvalue()
@@ -351,8 +336,9 @@ t['Expiry']           = t['Expiry'].dt.strftime("%B %d, %Y").replace(r"\b0","", 
 t['Transaction Date'] = t['Date'].dt.strftime("%B %d, %Y").replace(r"\b0","", regex=True)
 t['Strike']           = t['Strike'].map(lambda x: f"${x:,.1f}")
 t['Price']            = t['Price'].map(lambda x: f"${x:,.3f}")
+
 def fmt_amt(x):
-    return f"(${abs(x):,.1f})" if x<0 else f"${x:,.1f}"
+    return f"(${abs(x):,.1f})" if x < 0 else f"${x:,.1f}"
 t['Amount'] = t['CashFlow'].map(fmt_amt)
 
 display = pd.DataFrame({
