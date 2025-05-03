@@ -7,7 +7,7 @@ import matplotlib.pyplot as plt
 from matplotlib.backends.backend_pdf import PdfPages
 
 # ── 1) Page setup & global font ──────────────────────────────────────────
-st.set_page_config(page_title="Options P&L Summary", layout="wide")
+st.set_page_config(page_title="Options Income P&L Summary", layout="wide")
 st.markdown(
     """
     <style>
@@ -35,28 +35,32 @@ with st.container():
         <div class="centered">
           <h1 style="text-align: center; color: white; line-height: 1.2;">
             Welcome to<br/>
-            Options P&L Summary
+            Options Income P&L
           </h1>
           <p style="text-align: center; color: #888888; margin-top: 30px;">
-            Upload Schwab Transaction Summary CSV file to Start
+            Upload a Schwab Transaction Summary CSV file to Start
           </p>
         </div>
         """,
         unsafe_allow_html=True
     )
 
-# center the uploader under the splash, with a hidden non-empty label
 col1, col2, col3 = st.columns([1, 2, 1])
 with col2:
     uploaded = st.file_uploader(
         label="Upload CSV",
         type="csv",
-        accept_multiple_files=True,
-        label_visibility="hidden"
+        label_visibility="hidden"  # only one file allowed by default
     )
 
-# if no files yet, stop here
 if not uploaded:
+    # small creator credit at very bottom of landing page
+    st.markdown(
+        '<p style="text-align: center; color: #888888; font-size: 10px; margin-top: 10px;">'
+        'Created by Justin Zhao'
+        '</p>',
+        unsafe_allow_html=True
+    )
     st.stop()
 
 # ── 3) Main title once files are in ────────────────────────────────────────
@@ -65,6 +69,7 @@ st.title("Options P&L Summary")
 # ── 4) CSV parsing & cleaning ──────────────────────────────────────────────
 def process(df):
     opts = df[df['Description'].str.startswith(('PUT','CALL'))].copy()
+    opts = opts[opts['Action'].isin(['Sell to Open','Buy to Close','Expired'])].copy()
     parts = opts['Symbol'].str.split(' ', expand=True)
     opts['Underlying'] = parts[0]
     opts['Expiry']     = pd.to_datetime(parts[1])
@@ -83,10 +88,11 @@ def process(df):
     opts['Month'] = opts['Date'].dt.to_period('M').astype(str)
     return opts
 
-df   = pd.concat([pd.read_csv(f) for f in uploaded], ignore_index=True)
+# read single uploaded CSV
+df   = pd.read_csv(uploaded)
 opts = process(df)
 
-# ── 5) Settings expander ───────────────────────────────────────────────────
+# ── 5) Settings expander ─────────────────────────────────────────────
 with st.expander("Settings", expanded=False):
     tax_rate_pct = st.slider("Effective Tax Rate (%)", 30, 50, 36, 1)
     tax_rate     = tax_rate_pct / 100.0
@@ -130,17 +136,35 @@ pivot['PreTaxProfit'] = opts.groupby('Month')['CashFlow'].sum()
 pivot['ProfitPerCtr'] = pivot['PreTaxProfit']/pivot['Total']
 pivot = pivot[['P','C','Total','PreTaxProfit','ProfitPerCtr']].reset_index()
 
-chart_df               = pivot.copy()
+# ── TWEAK: Limit Monthly P&L to last 13 months ─────────────────────────
+pivot['Period'] = pd.to_datetime(pivot['Month'] + "-01").dt.to_period('M')
+latest_period = pivot['Period'].max()
+earliest_period = latest_period - 12
+pivot = pivot[(pivot['Period'] >= earliest_period) & (pivot['Period'] <= latest_period)].copy()
+pivot.drop(columns=['Period'], inplace=True)
+
+chart_df = pivot.copy()
 chart_df['MonthLabel'] = pd.to_datetime(chart_df['Month'] + "-01") \
                              .dt.strftime("%B %Y")
+chart_df['IsCurrent'] = chart_df['Month'] == datetime.date.today().strftime("%Y-%m")
 month_order = chart_df['MonthLabel'].tolist()
 
 # ── 8) Build Excel in-memory ──────────────────────────────────────────────
-ytd         = opts['CashFlow'].sum()
+current_year = datetime.date.today().year
+opts_current_year = opts[opts['Date'].dt.year == current_year]
+ytd         = opts_current_year['CashFlow'].sum()
 days_traded = max((pd.to_datetime('today') - opts['Date'].min()).days, 1)
 weekly_pre  = ytd / (days_traded / 7)
 tax_e       = ytd * tax_rate
 post_tax    = ytd - tax_e
+
+# ── 8a) Compute Average Monthly Pre-Tax Gain ───────────────────────────────
+current_month_str = datetime.date.today().strftime("%Y-%m")
+completed_months = pivot[
+    (pivot['Month'].str.startswith(str(current_year))) &
+    (pivot['Month'] < current_month_str)
+]
+avg_monthly_pre_tax = completed_months['PreTaxProfit'].mean() if not completed_months.empty else 0
 
 summary_df = pd.DataFrame({
     "Metric": [
@@ -158,8 +182,8 @@ summary_df = pd.DataFrame({
 })
 
 trade_df = opts.copy()
-trade_df['Expiry'] = trade_df['Expiry'].dt.strftime("%B %d, %Y").replace(r"\b0","", regex=True)
-trade_df['Date']   = trade_df['Date'].dt.strftime("%B %d, %Y").replace(r"\b0","", regex=True)
+trade_df['Expiry'] = trade_df['Expiry'].dt.strftime("%B %d, %Y").replace(" 0", " ")
+trade_df['Date']   = trade_df['Date'].dt.strftime("%B %d, %Y").replace(" 0", " ")
 
 excel_buffer = io.BytesIO()
 with pd.ExcelWriter(excel_buffer, engine="xlsxwriter") as writer:
@@ -172,80 +196,99 @@ with pd.ExcelWriter(excel_buffer, engine="xlsxwriter") as writer:
     )
 excel_bytes = excel_buffer.getvalue()
 
-# ── 9) PDF export function ─────────────────────────────────────────────────
+# ── 9) PDF export function (landscape A4 + Times New Roman + header spacing) ──
 def create_pdf(opts_df, chart_df, month_order, tax_rate, tax_rate_pct):
-    # Use tight_layout for PDF to avoid layoutgrid warning
-    fig = plt.figure(figsize=(8,10), facecolor='white')
+    # Landscape A4 orientation
+    fig = plt.figure(figsize=(11.69, 8.27), facecolor='white')
     today = datetime.date.today()
     suf = "th" if 11 <= today.day % 100 <= 13 else {1: "st", 2: "nd", 3: "rd"}.get(today.day % 10, "th")
     date_str = today.strftime(f"%B {today.day}{suf}, %Y")
 
-    # Header
-    ax1 = fig.add_axes([0.1, 0.82, 0.8, 0.16])
+    # Header (expanded vertical space)
+    ax1 = fig.add_axes([0.1, 0.78, 0.8, 0.20])
     ax1.axis('off')
-    ax1.text(0.5, 0.75,
+    ax1.text(0.5, 0.92,
              "Year-to-Date Options Income Summary",
              ha='center', va='center',
              fontsize=14, fontfamily='Times New Roman',
              fontweight='bold', color='black')
-    ax1.text(0.5, 0.62,
+    ax1.text(0.5, 0.81,
              date_str,
              ha='center', va='center',
-             fontsize=14, fontfamily='Times New Roman',
+             fontsize=12, fontfamily='Times New Roman',
              color='black')
 
     stats = [
-        ("YTD Gain Post-Fees:",      f"${ytd:,.1f}"),
-        ("Weekly Pre-Tax:",          f"${weekly_pre:,.1f}"),
-        (f"Tax Expense ({tax_rate_pct}%):", f"-${tax_e:,.1f}"),
-        ("YTD Post-Tax Gain:",       f"${post_tax:,.1f}")
+        ("YTD PreTax Gain (Includes Fees):",     f"${ytd:,.1f}"),
+        (f"Tax Expense ({tax_rate_pct}%):",      f"-${tax_e:,.1f}"),
+        ("YTD Post-Tax Gain:",                   f"${post_tax:,.1f}"),
+        ("Average Monthly Pre-Tax Gain:",        f"${avg_monthly_pre_tax:,.1f}")
     ]
     for i, (lbl, val) in enumerate(stats):
-        y = 0.44 - i * 0.10
+        y = 0.70 - i * 0.10
         ax1.text(0.48, y,
                  lbl,
                  ha='right', va='center',
-                 fontsize=14, fontfamily='Times New Roman',
+                 fontsize=10, fontfamily='Times New Roman',
                  fontweight='bold', color='black')
         ax1.text(0.52, y,
                  val,
                  ha='left', va='center',
-                 fontsize=14, fontfamily='Times New Roman',
+                 fontsize=10, fontfamily='Times New Roman',
                  color='black')
 
-    # Bar chart
-    ax2 = fig.add_axes([0.1, 0.25, 0.8, 0.45])
+    # Chart area
+    ax2 = fig.add_axes([0.1, 0.15, 0.8, 0.60])
     df2 = chart_df.set_index('MonthLabel').reindex(month_order)
 
     fill_color    = (226/255, 239/255, 218/255)
     outline_color = (55/255,  86/255,  35/255)
+    current_fill  = "#FFFFCC"
+    current_edge  = "#FF9900"
+    current_text  = "#FF9900"
 
-    bars = ax2.bar(df2.index, df2['PreTaxProfit'],
-                   color=fill_color, edgecolor=outline_color, linewidth=1.5)
-    for bar in bars:
+    bars = ax2.bar(
+        df2.index,
+        df2['PreTaxProfit'],
+        color=[current_fill if is_cur else fill_color for is_cur in df2['IsCurrent']],
+        edgecolor=[current_edge if is_cur else outline_color for is_cur in df2['IsCurrent']],
+        linewidth=1.5
+    )
+    for bar, is_cur in zip(bars, df2['IsCurrent']):
         h = bar.get_height()
-        ax2.text(bar.get_x() + bar.get_width()/2,
-                 h/2,
-                 f"${h:,.1f}",
-                 ha='center', va='center',
-                 color=outline_color, fontfamily='Arial', fontsize=12)
+        label = f"${h/1000:,.1f}K"
+        ax2.text(
+            bar.get_x() + bar.get_width() / 2,
+            h / 2,
+            label,
+            ha='center', va='center',
+            color=(current_text if is_cur else outline_color),
+            fontfamily='Times New Roman',
+            fontsize=10
+        )
 
     ax2.set_ylim(0, df2['PreTaxProfit'].max() * 1.1)
-    ax2.set_title("Monthly P&L Exhibit:",
-                  fontfamily='Times New Roman', fontsize=14,
-                  color='black', pad=12)
-    ax2.set_ylabel("Pre-Tax Profit",
-                   fontfamily='Arial', fontsize=12, color='black')
-    ax2.yaxis.set_ticks([0])
-    for spine in ['top','right']:
+    ax2.set_title(
+        "Monthly Pre-Tax P&L Exhibit:",
+        fontfamily='Times New Roman', fontsize=12,
+        color='black', pad=12,
+        fontweight='bold'
+    )
+
+    # Remove Y-axis entirely for PDF chart (only X axis)
+    ax2.yaxis.set_visible(False)
+    for spine in ['left','top','right']:
         ax2.spines[spine].set_visible(False)
-    ax2.spines['left'].set_color('black')
     ax2.spines['bottom'].set_color('black')
 
-    # Explicit ticks & tight layout
     ax2.set_xticks(range(len(month_order)))
-    ax2.set_xticklabels(month_order, rotation=45,
-                        ha='right', fontfamily='Arial', fontsize=12)
+    ax2.set_xticklabels(
+        month_order,
+        rotation=90,
+        ha='center',
+        fontfamily='Times New Roman',
+        fontsize=10
+    )
 
     fig.tight_layout(pad=2)
 
@@ -274,66 +317,167 @@ with c2:
 st.markdown("---")
 
 # ── 11) In-app YTD summary ─────────────────────────────────────────────────
-st.subheader("Year-to-Date Summary")
-col1, col2, col3 = st.columns(3)
-col1.metric("YTD Gain Post-Fees",           f"${ytd:,.1f}")
-col2.metric("Weekly Pre-Tax",               f"${weekly_pre:,.1f}")
-col3.metric(f"Tax Expense ({tax_rate_pct}%)", f"-${tax_e:,.1f}")
-st.metric("YTD Post-Tax Gain",              f"${post_tax:,.1f}")
+st.subheader(f"{current_year} Year-to-Date Summary")
+col1, col2, col3, col4 = st.columns(4)
+col1.metric("YTD Pre-Tax Gain",            f"${ytd:,.1f}")
+col2.metric(f"Tax Expense ({tax_rate_pct}%)", f"-${tax_e:,.1f}")
+col3.metric("YTD Post-Tax Gain",           f"${post_tax:,.1f}")
+col4.metric("Average Monthly Pre-Tax Gain", f"${avg_monthly_pre_tax:,.1f}")
 
 st.markdown("---")
 
 # ── 12) In-app Monthly P&L chart ────────────────────────────────────────────
-st.subheader("Monthly P&L")
+st.subheader("Monthly Pre-Tax P&L")
 fill_hex    = "#E2EFDA"
 outline_hex = "#375623"
+current_fill  = "#FFFFCC"
+current_edge  = "#FF9900"
+current_text  = "#FF9900"
+
+chart_df['IsCurrent'] = chart_df['Month'] == datetime.date.today().strftime("%Y-%m")
+chart_avg = chart_df['PreTaxProfit'].iloc[:-1].mean() if len(chart_df) > 1 else 0
+
 bars = (
     alt.Chart(chart_df)
-       .mark_bar(fill=fill_hex, stroke=outline_hex, strokeWidth=1.5)
+       .mark_bar(strokeWidth=1.5)
        .encode(
-           x=alt.X("MonthLabel:N", sort=month_order,
-                   axis=alt.Axis(labelAngle=0,
-                                 labelColor="white",
-                                 domainColor="white",
-                                 tickColor="white",
-                                 title=None)),
-           y=alt.Y("PreTaxProfit:Q",
-                   axis=alt.Axis(title="Pre-Tax Profit",
-                                 labels=False, grid=False))
+           x=alt.X(
+               "MonthLabel:N",
+               sort=month_order,
+               axis=alt.Axis(
+                   labelAngle=0,
+                   labelColor="white",
+                   domain=False,
+                   tickColor="white",
+                   title=None,
+                   labelExpr="split(datum.value,' ')[0] + '\\n' + split(datum.value,' ')[1]"
+               )
+           ),
+           y=alt.Y(
+               "PreTaxProfit:Q",
+               axis=alt.Axis(domain=False, ticks=False, labels=False, title=None)
+           ),
+           fill=alt.condition(
+               alt.datum.IsCurrent,
+               alt.value(current_fill),
+               alt.value(fill_hex)
+           ),
+           stroke=alt.condition(
+               alt.datum.IsCurrent,
+               alt.value(current_edge),
+               alt.value(outline_hex)
+           )
        )
 )
+
 labels = (
     alt.Chart(chart_df)
-       .transform_calculate(Mid="datum.PreTaxProfit/2")
-       .mark_text(align="center", baseline="middle",
-                  color=outline_hex, font="Arial")
+       .transform_calculate(
+           mid="datum.PreTaxProfit / 2",
+           k=" '$' + format(datum.PreTaxProfit/1000, '.1f') + 'K'"
+       )
+       .mark_text(align="center", baseline="middle")
        .encode(
            x=alt.X("MonthLabel:N", sort=month_order),
-           y=alt.Y("Mid:Q"),
-           text=alt.Text("PreTaxProfit:Q", format="$,.1f")
+           y=alt.Y("mid:Q"),
+           text=alt.Text("k:N"),
+           color=alt.condition(
+               alt.datum.IsCurrent,
+               alt.value(current_text),
+               alt.value(outline_hex)
+           )
        )
 )
-st.altair_chart((bars + labels).configure_view(strokeWidth=0),
-                use_container_width=True)
+
+avg_line = (
+    alt.Chart(pd.DataFrame({'avg': [chart_avg]}))
+       .mark_rule(color="#008000", size=1, strokeDash=[5,5])
+       .encode(y="avg:Q")
+)
+
+label_bg = (
+    alt.Chart(pd.DataFrame({
+        "MonthLabel": [month_order[-1]],
+        "avg": [chart_avg]
+    }))
+    .mark_rect(width=120, height=25, fill="black", stroke="white", strokeWidth=1)
+    .encode(
+        x=alt.X("MonthLabel:N", sort=month_order),
+        y=alt.Y("avg:Q")
+    )
+)
+
+avg_label = (
+    alt.Chart(pd.DataFrame({
+        "MonthLabel": [month_order[-1]],
+        "avg": [chart_avg],
+        "label": ["Monthly Average"]
+    }))
+    .mark_text(align="center", baseline="middle",
+               dx=0, dy=-1,
+               font="Arial", fontWeight="bold",
+               fontSize=12, color="white")
+    .encode(
+        x=alt.X("MonthLabel:N", sort=month_order),
+        y=alt.Y("avg:Q"),
+        text=alt.Text("label:N")
+    )
+)
+
+st.altair_chart(
+    (bars + labels + avg_line + label_bg + avg_label)
+      .configure_view(strokeWidth=0)
+      .configure_axis(labelColor="white"),
+    use_container_width=True
+)
+
+# ── 13) Period metrics below the chart ────────────────────────────────────
+current_month_str = datetime.date.today().strftime("%Y-%m")
+if chart_df['Month'].iloc[-1] == current_month_str:
+    completed = chart_df.iloc[:-1]
+else:
+    completed = chart_df.copy()
+
+start_label = completed['MonthLabel'].iloc[0]
+end_label   = completed['MonthLabel'].iloc[-1]
+date_range  = f"{start_label} - {end_label}"
+
+total_period = completed['PreTaxProfit'].sum()
+avg_period   = completed['PreTaxProfit'].mean() if len(completed) > 0 else 0
+
+col_avg, col_total = st.columns(2)
+with col_avg:
+    st.metric(
+        f"Average Monthly Pre-Tax Gain in Period ({date_range})",
+        f"${avg_period:,.1f}"
+    )
+with col_total:
+    st.metric(
+        f"Total Pre-Tax Gain in Period ({date_range})",
+        f"${total_period:,.1f}"
+    )
 
 st.markdown("---")
 
-# ── 13) In-app Current Exposure table ─────────────────────────────────────
-st.subheader("Current Exposure")
+# ── 14) In-app Current Exposure table ──────────────────────────────────────
+today_str = datetime.date.today().strftime("%B %d, %Y").replace(" 0", " ")
+st.subheader(f"Current Exposure as of {today_str}")
 exp_df = open_positions.copy()
-exp_df['Expiry'] = exp_df['Expiry'].dt.strftime("%B %d, %Y").replace(r"\b0","", regex=True)
+exp_df['Expiry'] = exp_df['Expiry'].dt.strftime("%B %d, %Y").replace(" 0", " ")
 exp_df['Strike'] = exp_df['Strike'].map(lambda x: f"${x:,.1f}")
 exp_df = exp_df.rename(columns={"OptType":"P/C"}).reset_index(drop=True)
-st.dataframe(exp_df[["Underlying","Expiry","Strike","P/C","Quantity"]],
-             use_container_width=True)
+st.dataframe(
+    exp_df[["Underlying","Expiry","Strike","P/C","Quantity"]],
+    use_container_width=True
+)
 
 st.markdown("---")
 
-# ── 14) In-app Transactions detail with color coding ──────────────────────
+# ── 15) In-app Transactions detail ─────────────────────────────────────────
 st.subheader("Transactions")
 t = opts.copy()
-t['Expiry']           = t['Expiry'].dt.strftime("%B %d, %Y").replace(r"\b0","", regex=True)
-t['Transaction Date'] = t['Date'].dt.strftime("%B %d, %Y").replace(r"\b0","", regex=True)
+t['Expiry']           = t['Expiry'].dt.strftime("%B %d, %Y").replace(" 0", " ")
+t['Transaction Date'] = t['Date'].dt.strftime("%B %d, %Y").replace(" 0", " ")
 t['Strike']           = t['Strike'].map(lambda x: f"${x:,.1f}")
 t['Price']            = t['Price'].map(lambda x: f"${x:,.3f}")
 
@@ -354,17 +498,12 @@ display = pd.DataFrame({
     "Position Status":  t['PositionStatus']
 })
 
-# Define row-wise styling
 def highlight_row(row):
     if row["Action"] == "Sell to Open":
-        return ["color: #008000"] * len(row)    # green
-    elif row["Action"] == "Buy to Close":
-        return ["color: #FF0000"] * len(row)    # red
-    elif "Expired" in row["Position Status"]:
-        return ["color: #FF8C00"] * len(row)    # dark orange
-    else:
-        return [""] * len(row)
+        return ["background-color: #233723"] * len(row)
+    if row["Action"] == "Buy to Close":
+        return ["background-color: #431B1D"] * len(row)
+    return ["background-color: #4E3B1E"] * len(row)
 
 styled = display.reset_index(drop=True).style.apply(highlight_row, axis=1)
-
 st.dataframe(styled, use_container_width=True)
