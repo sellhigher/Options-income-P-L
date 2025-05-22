@@ -56,7 +56,7 @@ with col2:
 if not uploaded:
     # small creator credit at very bottom of landing page
     st.markdown(
-        '<p style="text-align: center; color: #888888; font-size: 10px; margin-top: 10px;">'
+        '<p style="text-align: center; color: #888888; font-size: 12px; margin-top: 10px;">'
         'Created by Justin Zhao'
         '</p>',
         unsafe_allow_html=True
@@ -93,7 +93,7 @@ df   = pd.read_csv(uploaded)
 opts = process(df)
 
 # ── 5) Settings expander ─────────────────────────────────────────────
-with st.expander("Settings", expanded=False):
+with st.expander("Tax Rate Setting", expanded=False):
     tax_rate_pct = st.slider("Effective Tax Rate (%)", 30, 50, 36, 1)
     tax_rate     = tax_rate_pct / 100.0
 
@@ -107,22 +107,36 @@ def signed_qty(row):
 
 opts['SignedQty'] = opts.apply(signed_qty, axis=1)
 
+# aggregate net signed quantity per contract
 grp = (
     opts
       .groupby(['Underlying','Expiry','Strike','OptType'])['SignedQty']
-      .sum().reset_index()
+      .sum()
+      .reset_index()
 )
-open_positions = grp[grp['SignedQty']>0] \
-                    .rename(columns={'SignedQty':'Quantity'}) \
-                    [['Underlying','Expiry','Strike','OptType','Quantity']]
 
-net_map = grp.set_index(['Underlying','Expiry','Strike','OptType'])['SignedQty']
-opts['PositionStatus'] = opts.apply(
-    lambda r: "Open"
-      if net_map.loc[(r.Underlying,r.Expiry,r.Strike,r.OptType)]>0
-      else "Expired/Closed",
-    axis=1
+# build current exposures (net > 0)
+open_positions = (
+    grp[grp['SignedQty'] > 0]
+      .rename(columns={'SignedQty':'Quantity'})
+      [['Underlying','Expiry','Strike','OptType','Quantity']]
 )
+
+# ── 6b) expiry‐override: drop any contract whose Expiry is before today
+today = pd.to_datetime('today').normalize()
+open_positions = open_positions[open_positions['Expiry'] >= today]
+
+# build a lookup map for net qty
+net_map = grp.set_index(['Underlying','Expiry','Strike','OptType'])['SignedQty']
+
+# assign PositionStatus on every trade, but force Expired/Closed if past expiry
+def get_status(r):
+    if r.Expiry < today:
+        return "Expired/Closed"
+    return "Open" if net_map.loc[(r.Underlying, r.Expiry, r.Strike, r.OptType)] > 0 \
+                  else "Expired/Closed"
+
+opts['PositionStatus'] = opts.apply(get_status, axis=1)
 
 # ── 7) Monthly pivot & chart data ─────────────────────────────────────────
 pivot = (
@@ -136,7 +150,7 @@ pivot['PreTaxProfit'] = opts.groupby('Month')['CashFlow'].sum()
 pivot['ProfitPerCtr'] = pivot['PreTaxProfit']/pivot['Total']
 pivot = pivot[['P','C','Total','PreTaxProfit','ProfitPerCtr']].reset_index()
 
-# ── TWEAK: Limit Monthly P&L to last 13 months ─────────────────────────
+# ── Limit Monthly P&L to last 13 months maximum ─────────────────────────
 pivot['Period'] = pd.to_datetime(pivot['Month'] + "-01").dt.to_period('M')
 latest_period = pivot['Period'].max()
 earliest_period = latest_period - 12
@@ -196,50 +210,95 @@ with pd.ExcelWriter(excel_buffer, engine="xlsxwriter") as writer:
     )
 excel_bytes = excel_buffer.getvalue()
 
-# ── 9) PDF export function (landscape A4 + Times New Roman + header spacing) ──
+# ── 9) PDF export function (two tables + chart + footer metrics) ─────────────────
 def create_pdf(opts_df, chart_df, month_order, tax_rate, tax_rate_pct):
-    # Landscape A4 orientation
+    import io
+    import datetime
+    import matplotlib.pyplot as plt
+    from matplotlib.backends.backend_pdf import PdfPages
+
     fig = plt.figure(figsize=(11.69, 8.27), facecolor='white')
     today = datetime.date.today()
+
     suf = "th" if 11 <= today.day % 100 <= 13 else {1: "st", 2: "nd", 3: "rd"}.get(today.day % 10, "th")
     date_str = today.strftime(f"%B {today.day}{suf}, %Y")
 
-    # Header (expanded vertical space)
-    ax1 = fig.add_axes([0.1, 0.78, 0.8, 0.20])
-    ax1.axis('off')
-    ax1.text(0.5, 0.92,
-             "Year-to-Date Options Income Summary",
-             ha='center', va='center',
-             fontsize=14, fontfamily='Times New Roman',
-             fontweight='bold', color='black')
-    ax1.text(0.5, 0.81,
-             date_str,
-             ha='center', va='center',
-             fontsize=12, fontfamily='Times New Roman',
-             color='black')
-
-    stats = [
-        ("YTD PreTax Gain (Includes Fees):",     f"${ytd:,.1f}"),
-        (f"Tax Expense ({tax_rate_pct}%):",      f"-${tax_e:,.1f}"),
-        ("YTD Post-Tax Gain:",                   f"${post_tax:,.1f}"),
-        ("Average Monthly Pre-Tax Gain:",        f"${avg_monthly_pre_tax:,.1f}")
+    # --- compute the two table datasets ---
+    left_data = [
+        ["YTD Pre-Tax Gain (Includes Fees)",   f"${ytd:,.1f}"],
+        [f"Tax Expense ({tax_rate_pct}%)",     f"(${tax_e:,.1f})"],
+        ["YTD Post-Tax Gain",                  f"${post_tax:,.1f}"],
+        ["Average Monthly Pre-Tax Gain",       f"${avg_monthly_pre_tax:,.1f}"]
     ]
-    for i, (lbl, val) in enumerate(stats):
-        y = 0.70 - i * 0.10
-        ax1.text(0.48, y,
-                 lbl,
-                 ha='right', va='center',
-                 fontsize=10, fontfamily='Times New Roman',
-                 fontweight='bold', color='black')
-        ax1.text(0.52, y,
-                 val,
-                 ha='left', va='center',
-                 fontsize=10, fontfamily='Times New Roman',
-                 color='black')
 
-    # Chart area
-    ax2 = fig.add_axes([0.1, 0.15, 0.8, 0.60])
+    # Period metrics (only completed months)
     df2 = chart_df.set_index('MonthLabel').reindex(month_order)
+    completed = df2.loc[~df2['IsCurrent'], 'PreTaxProfit']
+    total_period = completed.sum()
+    avg_period   = completed.mean() if not completed.empty else 0
+    completed_labels = [lbl for lbl, is_cur in zip(month_order, df2['IsCurrent']) if not is_cur]
+    period_str = f"{completed_labels[0]} – {completed_labels[-1]}" if completed_labels else ""
+
+    right_data = [
+        ["Total Pre-Tax Gain in Period",        f"${total_period:,.1f}"],
+        ["Avg. Monthly Pre-Tax Gain in Period", f"${avg_period:,.1f}"]
+    ]
+
+    axL = fig.add_axes([0.05, 0.78, 0.45, 0.17])
+    axL.axis('off')
+
+    tblL = axL.table(
+        cellText=[
+            ["Year-to-Date Income Summary", ""],
+            [f"({date_str})", ""],
+            *left_data
+        ],
+        colWidths=[0.65, 0.35],
+        loc='upper left'
+    )
+    tblL.auto_set_font_size(False)
+    tblL.set_fontsize(10)
+    tblL.scale(1, 1.5)
+
+    for cell in tblL.get_celld().values():
+        cell.set_edgecolor('black')
+        cell.set_linewidth(1)
+
+    for (r, c), cell in tblL.get_celld().items():
+        if r == 0:   # title row
+            cell.set_text_props(ha='center', va='center', fontfamily='Times New Roman', fontweight='bold')
+        elif r == 1: # date row
+            cell.set_text_props(ha='center', va='center', fontfamily='Times New Roman', fontweight='normal')
+        else:        # data rows
+            cell.set_text_props(ha=('left' if c == 0 else 'center'), fontfamily='Times New Roman', va='center')
+
+    # --- right table (Monthly Pre-Tax P&L) ---
+    axR = fig.add_axes([0.52, 0.78, 0.43, 0.17])
+    axR.axis('off')
+    tblR = axR.table(
+        cellText=[
+            ["Monthly Pre-Tax P&L", ""],
+            [f"({period_str})", ""],
+            *right_data
+        ],
+        colWidths=[0.65, 0.35],
+        loc='upper left'
+    )
+    tblR.auto_set_font_size(False)
+    tblR.set_fontsize(10)
+    tblR.scale(1, 1.5)
+    for cell in tblR.get_celld().values():
+        cell.set_edgecolor('black')
+        cell.set_linewidth(1)
+    for (r, c), cell in tblR.get_celld().items():
+        if r == 0:
+            cell.set_text_props(ha='center', va='center', fontfamily='Times New Roman', fontweight='bold')
+        elif r == 1:
+            cell.set_text_props(ha='center', va='center', fontfamily='Times New Roman', fontweight='normal')
+        else:
+            cell.set_text_props(ha=('left' if c == 0 else 'center'), va='center', fontfamily='Times New Roman',)
+
+    ax2 = fig.add_axes([0.1, 0.10, 0.8, 0.60])
 
     fill_color    = (226/255, 239/255, 218/255)
     outline_color = (55/255,  86/255,  35/255)
@@ -258,8 +317,8 @@ def create_pdf(opts_df, chart_df, month_order, tax_rate, tax_rate_pct):
         h = bar.get_height()
         label = f"${h/1000:,.1f}K"
         ax2.text(
-            bar.get_x() + bar.get_width() / 2,
-            h / 2,
+            bar.get_x() + bar.get_width()/2,
+            h/2,
             label,
             ha='center', va='center',
             color=(current_text if is_cur else outline_color),
@@ -271,26 +330,18 @@ def create_pdf(opts_df, chart_df, month_order, tax_rate, tax_rate_pct):
     ax2.set_title(
         "Monthly Pre-Tax P&L Exhibit:",
         fontfamily='Times New Roman', fontsize=12,
-        color='black', pad=12,
-        fontweight='bold'
+        color='black', pad=12, fontweight='bold'
     )
 
-    # Remove Y-axis entirely for PDF chart (only X axis)
     ax2.yaxis.set_visible(False)
     for spine in ['left','top','right']:
         ax2.spines[spine].set_visible(False)
     ax2.spines['bottom'].set_color('black')
-
     ax2.set_xticks(range(len(month_order)))
     ax2.set_xticklabels(
-        month_order,
-        rotation=90,
-        ha='center',
-        fontfamily='Times New Roman',
-        fontsize=10
+        month_order, rotation=90, ha='center',
+        fontfamily='Times New Roman', fontsize=10
     )
-
-    fig.tight_layout(pad=2)
 
     buf = io.BytesIO()
     with PdfPages(buf) as pdf:
@@ -299,6 +350,7 @@ def create_pdf(opts_df, chart_df, month_order, tax_rate, tax_rate_pct):
     plt.close(fig)
     return buf.getvalue()
 
+# ── 9b) Generate PDF bytes ─────────────────────────────────────────────────
 pdf_bytes = create_pdf(opts, chart_df, month_order, tax_rate, tax_rate_pct)
 
 # ── 10) Download buttons ──────────────────────────────────────────────────
