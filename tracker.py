@@ -6,6 +6,7 @@ import altair as alt
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_pdf import PdfPages
 
+#. .\.venv\Scripts\Activate.ps1 <<<Paste into Windows Powershell
 # ── 1) Page setup & global font ──────────────────────────────────────────
 st.set_page_config(page_title="Options Income P&L Summary", layout="wide")
 st.markdown(
@@ -163,7 +164,7 @@ chart_df['MonthLabel'] = pd.to_datetime(chart_df['Month'] + "-01") \
 chart_df['IsCurrent'] = chart_df['Month'] == datetime.date.today().strftime("%Y-%m")
 month_order = chart_df['MonthLabel'].tolist()
 
-# ── 8) Build Excel in-memory ──────────────────────────────────────────────
+# ——— Compute your summary_df and trade_df just once ———
 current_year = datetime.date.today().year
 opts_current_year = opts[opts['Date'].dt.year == current_year]
 ytd         = opts_current_year['CashFlow'].sum()
@@ -172,14 +173,17 @@ weekly_pre  = ytd / (days_traded / 7)
 tax_e       = ytd * tax_rate
 post_tax    = ytd - tax_e
 
-# ── 8a) Compute Average Monthly Pre-Tax Gain ───────────────────────────────
 current_month_str = datetime.date.today().strftime("%Y-%m")
 completed_months = pivot[
     (pivot['Month'].str.startswith(str(current_year))) &
     (pivot['Month'] < current_month_str)
 ]
-avg_monthly_pre_tax = completed_months['PreTaxProfit'].mean() if not completed_months.empty else 0
+avg_monthly_pre_tax = (
+    completed_months['PreTaxProfit'].mean()
+    if not completed_months.empty else 0
+)
 
+# This is your YTD summary (numeric Value)
 summary_df = pd.DataFrame({
     "Metric": [
         "YTD Pre-Tax Gain",
@@ -187,27 +191,55 @@ summary_df = pd.DataFrame({
         f"Tax Expense ({tax_rate_pct}% Effective Rate)",
         "YTD Post-Tax Gain"
     ],
-    "Value": [
-        ytd,
-        weekly_pre,
-        -tax_e,
-        post_tax
-    ]
+    "Value": [ytd, weekly_pre, -tax_e, post_tax]
 })
 
+# Copy opts into trade_df but KEEP Date/Expiry as real datetimes
 trade_df = opts.copy()
-trade_df['Expiry'] = trade_df['Expiry'].dt.strftime("%B %d, %Y").replace(" 0", " ")
-trade_df['Date']   = trade_df['Date'].dt.strftime("%B %d, %Y").replace(" 0", " ")
 
+# ── Now write all three sheets with proper formatting ───────────────────────────
 excel_buffer = io.BytesIO()
-with pd.ExcelWriter(excel_buffer, engine="xlsxwriter") as writer:
+with pd.ExcelWriter(
+    excel_buffer,
+    engine="xlsxwriter",
+    date_format='yyyy-mm-dd',
+    datetime_format='yyyy-mm-dd'
+) as writer:
+    # Sheet 1: YTD Summary
     summary_df.to_excel(writer, sheet_name="YTD Summary", index=False)
+
+    # Sheet 2: Current Exposure (Expiry is datetime, Quantity numeric)
     open_positions.to_excel(writer, sheet_name="Current Exposure", index=False)
-    trade_df[[ 'Underlying','Expiry','Date','ActionType',
-               'Strike','OptType','Quantity','Price',
-               'CashFlow','PositionStatus' ]].to_excel(
-        writer, sheet_name="Trade Detail", index=False
-    )
+
+    # Sheet 3: Trade Detail
+    trade_df[
+       ['Underlying','Expiry','Date','ActionType',
+        'Strike','OptType','Quantity','Price','CashFlow','PositionStatus']
+    ].to_excel(writer, sheet_name="Trade Detail", index=False)
+
+    # Grab the workbook & define formats
+    workbook  = writer.book
+    date_fmt  = workbook.add_format({ 'num_format': 'yyyy-mm-dd' })
+    money_fmt = workbook.add_format({ 'num_format': '$#,##0.00' })
+    int_fmt   = workbook.add_format({ 'num_format': '0' })
+
+    # — Format YTD Summary —
+    ws1 = writer.sheets['YTD Summary']
+    ws1.set_column('B:B', 18, money_fmt)     # Value column
+
+    # — Format Current Exposure —
+    ws2 = writer.sheets['Current Exposure']
+    ws2.set_column('B:B', 15, date_fmt)      # Expiry
+    ws2.set_column('E:E', 10, int_fmt)       # Quantity
+
+    # — Format Trade Detail —
+    ws3 = writer.sheets['Trade Detail']
+    ws3.set_column('B:C', 15, date_fmt)      # Expiry (B), Date (C)
+    ws3.set_column('E:E', 10, int_fmt)       # Strike
+    ws3.set_column('G:G', 10, int_fmt)       # Quantity
+    ws3.set_column('H:I', 12, money_fmt)     # Price (H), CashFlow (I)
+
+# Pull out the bytes for the download button
 excel_bytes = excel_buffer.getvalue()
 
 # ── 9) PDF export function (two tables + chart + footer metrics) ─────────────────
