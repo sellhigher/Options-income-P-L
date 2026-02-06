@@ -16,6 +16,7 @@ st.markdown(
         font-family: 'Arial', sans-serif !important;
         background-color: #0E1117;
       }
+
       .centered {
         display: flex;
         flex-direction: column;
@@ -24,6 +25,15 @@ st.markdown(
         margin-top: 100px;
         margin-bottom: 100px;
       }
+
+      .welcome-title {
+        font-family: "Times New Roman", Times, serif !important;
+        font-weight: 200;
+        font-size: 3.8rem;
+        letter-spacing: -0.5px;
+        line-height: 1.05;
+        text-align: center;
+        }
     </style>
     """,
     unsafe_allow_html=True
@@ -32,18 +42,14 @@ st.markdown(
 # ── 2) Landing / splash screen ─────────────────────────────────────────────
 with st.container():
     st.markdown(
-        """
-        <div class="centered">
-          <h1 style="text-align: center; color: white; line-height: 1.2;">
-            Welcome to<br/>
-            Options Income P&L
-          </h1>
-          <p style="text-align: center; color: #888888; margin-top: 30px;">
-            Upload a Schwab Transaction Summary CSV file to Start
-          </p>
+    """
+    <div class="centered">
+        <div class="welcome-title">
+            Welcome to<br>Options Income P&L
         </div>
-        """,
-        unsafe_allow_html=True
+    </div>
+    """,
+    unsafe_allow_html=True
     )
 
 col1, col2, col3 = st.columns([1, 2, 1])
@@ -429,12 +435,16 @@ bars = (
                "MonthLabel:N",
                sort=month_order,
                axis=alt.Axis(
-                   labelAngle=0,
-                   labelColor="white",
-                   domain=False,
-                   tickColor="white",
-                   title=None,
-                   labelExpr="split(datum.value,' ')[0] + '\\n' + split(datum.value,' ')[1]"
+                    labelAngle=0,
+                    labelColor="white",
+                    labelFontSize=16,
+                    labelLineHeight=16,
+                    labelLimit=0,
+                    labelFontWeight="bold",
+                    domain=False,
+                    tickColor="white",
+                    title=None,
+                    labelExpr="split(datum.value, ' ')"
                )
            ),
            y=alt.Y(
@@ -460,7 +470,7 @@ labels = (
            mid="datum.PreTaxProfit / 2",
            k=" '$' + format(datum.PreTaxProfit/1000, '.1f') + 'K'"
        )
-       .mark_text(align="center", baseline="middle")
+       .mark_text(align="center", baseline="middle", fontSize=16, fontWeight="normal")
        .encode(
            x=alt.X("MonthLabel:N", sort=month_order),
            y=alt.Y("mid:Q"),
@@ -495,12 +505,12 @@ avg_label = (
     alt.Chart(pd.DataFrame({
         "MonthLabel": [month_order[-1]],
         "avg": [chart_avg],
-        "label": ["Monthly Average"]
+        "label": ["Monthly Avg."]
     }))
     .mark_text(align="center", baseline="middle",
                dx=0, dy=-1,
-               font="Arial", fontWeight="bold",
-               fontSize=12, color="white")
+               font="Arial", fontWeight="normal", fontStyle="italic",
+               fontSize=16, color="white")
     .encode(
         x=alt.X("MonthLabel:N", sort=month_order),
         y=alt.Y("avg:Q"),
