@@ -73,7 +73,7 @@ if not uploaded:
 st.title("Options P&L Summary")
 
 # ── 4) CSV parsing & cleaning ──────────────────────────────────────────────
-SPREAD_TICKERS = {'SPXW', 'NDX', 'SPY', 'QQQ'}
+SPREAD_TICKERS = {'SPXW', 'NDX', 'SPY'}
 
 def process(df):
     opts = df[df['Description'].str.startswith(('PUT','CALL'))].copy()
@@ -202,7 +202,7 @@ summary_df = pd.DataFrame({
         f"Tax Expense ({tax_rate_pct}% Effective Rate)",
         "YTD Post-Tax Gain",
         "Average Monthly Pre-Tax Gain",
-        "Annualized Run Rate"
+        "Annualized Run Rate (Estimate)"
     ],
     "Value": [ytd, -tax_e, post_tax, avg_monthly_pre_tax, annualized]
 })
@@ -267,7 +267,7 @@ def create_summary_image(opts_df, chart_df, month_order, tax_rate, tax_rate_pct)
         ["YTD Pre-Tax Gain",             f"${ytd:,.1f}"],
         ["YTD Post-Tax Gain",            f"${post_tax:,.1f}"],
         ["Average Monthly Pre-Tax Gain", f"${avg_monthly_pre_tax:,.1f}"],
-        ["Annualized Run Rate",          f"${annualized:,.1f}"],
+        ["Annualized Run Rate (Estimate)",          f"${annualized:,.1f}"],
     ]
 
     df2 = chart_df.set_index('MonthLabel').reindex(month_order)
@@ -391,8 +391,6 @@ with c2:
                        summary_image_bytes,
                        "options_summary.png",
                        "image/png")
-
-
 st.markdown("---")
 
 # ── 11) In-app YTD summary ─────────────────────────────────────────────────
@@ -401,7 +399,7 @@ col1, col2, col3, col4 = st.columns(4)
 col1.metric("YTD Pre-Tax Gain",             f"${ytd:,.1f}")
 col2.metric("YTD Post-Tax Gain",            f"${post_tax:,.1f}")
 col3.metric("Average Monthly Pre-Tax Gain", f"${avg_monthly_pre_tax:,.1f}")
-col4.metric("Annualized Run Rate",          f"${annualized:,.1f}")
+col4.metric("Annualized Run Rate (Estimate)",          f"${annualized:,.1f}")
 
 st.markdown("---")
 
