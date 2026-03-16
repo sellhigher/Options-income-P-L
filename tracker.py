@@ -4,7 +4,6 @@ import pandas as pd
 import streamlit as st
 import altair as alt
 import matplotlib.pyplot as plt
-from matplotlib.backends.backend_pdf import PdfPages
 
 #. .\.venv\Scripts\Activate.ps1 <<<Paste into Windows Powershell
 # ── 1) Page setup & global font ──────────────────────────────────────────
@@ -74,11 +73,18 @@ if not uploaded:
 st.title("Options P&L Summary")
 
 # ── 4) CSV parsing & cleaning ──────────────────────────────────────────────
+SPREAD_TICKERS = {'SPXW', 'NDX', 'SPY', 'QQQ'}
+
 def process(df):
     opts = df[df['Description'].str.startswith(('PUT','CALL'))].copy()
-    opts = opts[opts['Action'].isin(['Sell to Open','Buy to Close','Expired'])].copy()
     parts = opts['Symbol'].str.split(' ', expand=True)
     opts['Underlying'] = parts[0]
+    spread_mask = opts['Underlying'].isin(SPREAD_TICKERS)
+    action_mask = (
+        opts['Action'].isin(['Sell to Open', 'Buy to Close', 'Expired']) |
+        (spread_mask & opts['Action'].isin(['Buy to Open', 'Sell to Close']))
+    )
+    opts = opts[action_mask].copy()
     opts['Expiry']     = pd.to_datetime(parts[1])
     opts['Strike']     = parts[2].astype(float)
     opts['OptType']    = parts[3]
@@ -106,9 +112,9 @@ with st.expander("Tax Rate Setting", expanded=False):
 
 # ── 6) Compute open vs closed positions ───────────────────────────────────
 def signed_qty(row):
-    if "Sell to Open" in row.ActionType:
+    if row.ActionType in ('Sell to Open', 'Buy to Open'):
         return +row.Quantity
-    if "Buy to Close" in row.ActionType or "Expir" in row.ActionType:
+    if row.ActionType in ('Buy to Close', 'Sell to Close') or 'Expir' in row.ActionType:
         return -row.Quantity
     return 0
 
@@ -155,7 +161,7 @@ pivot = (
 pivot['Total']        = pivot.sum(axis=1)
 pivot['PreTaxProfit'] = opts.groupby('Month')['CashFlow'].sum()
 pivot['ProfitPerCtr'] = pivot['PreTaxProfit']/pivot['Total']
-pivot = pivot[['P','C','Total','PreTaxProfit','ProfitPerCtr']].reset_index()
+pivot = pivot.reindex(columns=['P','C','Total','PreTaxProfit','ProfitPerCtr'], fill_value=0).reset_index()
 
 # ── Limit Monthly P&L to last 13 months maximum ─────────────────────────
 pivot['Period'] = pd.to_datetime(pivot['Month'] + "-01").dt.to_period('M')
@@ -173,11 +179,11 @@ month_order = chart_df['MonthLabel'].tolist()
 # ——— Compute your summary_df and trade_df just once ———
 current_year = datetime.date.today().year
 opts_current_year = opts[opts['Date'].dt.year == current_year]
-ytd         = opts_current_year['CashFlow'].sum()
-days_traded = max((pd.to_datetime('today') - opts['Date'].min()).days, 1)
-weekly_pre  = ytd / (days_traded / 7)
-tax_e       = ytd * tax_rate
-post_tax    = ytd - tax_e
+ytd          = opts_current_year['CashFlow'].sum()
+days_elapsed = max((pd.to_datetime('today') - opts_current_year['Date'].min()).days, 1)
+annualized   = (ytd / days_elapsed) * 365
+tax_e        = ytd * tax_rate
+post_tax     = ytd - tax_e
 
 current_month_str = datetime.date.today().strftime("%Y-%m")
 completed_months = pivot[
@@ -193,11 +199,12 @@ avg_monthly_pre_tax = (
 summary_df = pd.DataFrame({
     "Metric": [
         "YTD Pre-Tax Gain",
-        "Weekly Pre-Tax Gain",
         f"Tax Expense ({tax_rate_pct}% Effective Rate)",
-        "YTD Post-Tax Gain"
+        "YTD Post-Tax Gain",
+        "Average Monthly Pre-Tax Gain",
+        "Annualized Run Rate"
     ],
-    "Value": [ytd, weekly_pre, -tax_e, post_tax]
+    "Value": [ytd, -tax_e, post_tax, avg_monthly_pre_tax, annualized]
 })
 
 # Copy opts into trade_df but KEEP Date/Expiry as real datetimes
@@ -248,28 +255,21 @@ with pd.ExcelWriter(
 # Pull out the bytes for the download button
 excel_bytes = excel_buffer.getvalue()
 
-# ── 9) PDF export function (two tables + chart + footer metrics) ─────────────────
-def create_pdf(opts_df, chart_df, month_order, tax_rate, tax_rate_pct):
-    import io
-    import datetime
-    import matplotlib.pyplot as plt
-    from matplotlib.backends.backend_pdf import PdfPages
-
+# ── 9) Summary image export (two tables + chart) ──────────────────────────
+def create_summary_image(opts_df, chart_df, month_order, tax_rate, tax_rate_pct):
     fig = plt.figure(figsize=(11.69, 8.27), facecolor='white')
     today = datetime.date.today()
 
     suf = "th" if 11 <= today.day % 100 <= 13 else {1: "st", 2: "nd", 3: "rd"}.get(today.day % 10, "th")
     date_str = today.strftime(f"%B {today.day}{suf}, %Y")
 
-    # --- compute the two table datasets ---
     left_data = [
-        ["YTD Pre-Tax Gain (Includes Fees)",   f"${ytd:,.1f}"],
-        [f"Tax Expense ({tax_rate_pct}%)",     f"(${tax_e:,.1f})"],
-        ["YTD Post-Tax Gain",                  f"${post_tax:,.1f}"],
-        ["Average Monthly Pre-Tax Gain",       f"${avg_monthly_pre_tax:,.1f}"]
+        ["YTD Pre-Tax Gain",             f"${ytd:,.1f}"],
+        ["YTD Post-Tax Gain",            f"${post_tax:,.1f}"],
+        ["Average Monthly Pre-Tax Gain", f"${avg_monthly_pre_tax:,.1f}"],
+        ["Annualized Run Rate",          f"${annualized:,.1f}"],
     ]
 
-    # Period metrics (only completed months)
     df2 = chart_df.set_index('MonthLabel').reindex(month_order)
     completed = df2.loc[~df2['IsCurrent'], 'PreTaxProfit']
     total_period = completed.sum()
@@ -284,7 +284,6 @@ def create_pdf(opts_df, chart_df, month_order, tax_rate, tax_rate_pct):
 
     axL = fig.add_axes([0.05, 0.78, 0.45, 0.17])
     axL.axis('off')
-
     tblL = axL.table(
         cellText=[
             ["Year-to-Date Income Summary", ""],
@@ -297,20 +296,17 @@ def create_pdf(opts_df, chart_df, month_order, tax_rate, tax_rate_pct):
     tblL.auto_set_font_size(False)
     tblL.set_fontsize(10)
     tblL.scale(1, 1.5)
-
     for cell in tblL.get_celld().values():
         cell.set_edgecolor('black')
         cell.set_linewidth(1)
-
     for (r, c), cell in tblL.get_celld().items():
-        if r == 0:   # title row
+        if r == 0:
             cell.set_text_props(ha='center', va='center', fontfamily='Times New Roman', fontweight='bold')
-        elif r == 1: # date row
+        elif r == 1:
             cell.set_text_props(ha='center', va='center', fontfamily='Times New Roman', fontweight='normal')
-        else:        # data rows
+        else:
             cell.set_text_props(ha=('left' if c == 0 else 'center'), fontfamily='Times New Roman', va='center')
 
-    # --- right table (Monthly Pre-Tax P&L) ---
     axR = fig.add_axes([0.52, 0.78, 0.43, 0.17])
     axR.axis('off')
     tblR = axR.table(
@@ -334,10 +330,9 @@ def create_pdf(opts_df, chart_df, month_order, tax_rate, tax_rate_pct):
         elif r == 1:
             cell.set_text_props(ha='center', va='center', fontfamily='Times New Roman', fontweight='normal')
         else:
-            cell.set_text_props(ha=('left' if c == 0 else 'center'), va='center', fontfamily='Times New Roman',)
+            cell.set_text_props(ha=('left' if c == 0 else 'center'), va='center', fontfamily='Times New Roman')
 
     ax2 = fig.add_axes([0.1, 0.10, 0.8, 0.60])
-
     fill_color    = (226/255, 239/255, 218/255)
     outline_color = (55/255,  86/255,  35/255)
     current_fill  = "#FFFFCC"
@@ -353,11 +348,10 @@ def create_pdf(opts_df, chart_df, month_order, tax_rate, tax_rate_pct):
     )
     for bar, is_cur in zip(bars, df2['IsCurrent']):
         h = bar.get_height()
-        label = f"${h/1000:,.1f}K"
         ax2.text(
             bar.get_x() + bar.get_width()/2,
             h/2,
-            label,
+            f"${h/1000:,.1f}K",
             ha='center', va='center',
             color=(current_text if is_cur else outline_color),
             fontfamily='Times New Roman',
@@ -365,54 +359,49 @@ def create_pdf(opts_df, chart_df, month_order, tax_rate, tax_rate_pct):
         )
 
     ax2.set_ylim(0, df2['PreTaxProfit'].max() * 1.1)
-    ax2.set_title(
-        "Monthly Pre-Tax P&L Exhibit:",
-        fontfamily='Times New Roman', fontsize=12,
-        color='black', pad=12, fontweight='bold'
-    )
-
+    ax2.set_title("Monthly Pre-Tax P&L Exhibit:",
+                  fontfamily='Times New Roman', fontsize=12,
+                  color='black', pad=12, fontweight='bold')
     ax2.yaxis.set_visible(False)
-    for spine in ['left','top','right']:
+    for spine in ['left', 'top', 'right']:
         ax2.spines[spine].set_visible(False)
     ax2.spines['bottom'].set_color('black')
     ax2.set_xticks(range(len(month_order)))
-    ax2.set_xticklabels(
-        month_order, rotation=90, ha='center',
-        fontfamily='Times New Roman', fontsize=10
-    )
+    ax2.set_xticklabels(month_order, rotation=90, ha='center',
+                        fontfamily='Times New Roman', fontsize=10)
 
     buf = io.BytesIO()
-    with PdfPages(buf) as pdf:
-        pdf.savefig(fig, facecolor='white', bbox_inches='tight')
+    fig.savefig(buf, format='png', facecolor='white', bbox_inches='tight', dpi=150)
     buf.seek(0)
     plt.close(fig)
     return buf.getvalue()
 
-# ── 9b) Generate PDF bytes ─────────────────────────────────────────────────
-pdf_bytes = create_pdf(opts, chart_df, month_order, tax_rate, tax_rate_pct)
+# ── 9b) Generate summary image bytes ──────────────────────────────────────
+summary_image_bytes = create_summary_image(opts, chart_df, month_order, tax_rate, tax_rate_pct)
 
 # ── 10) Download buttons ──────────────────────────────────────────────────
 c1, c2 = st.columns(2, gap="small")
 with c1:
-    st.download_button("📥 Export to Excel",
+    st.download_button("Export to Excel",
                        excel_bytes,
                        "options_pnl.xlsx",
                        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 with c2:
-    st.download_button("📥 Download PDF Summary",
-                       pdf_bytes,
-                       "options_summary.pdf",
-                       "application/pdf")
+    st.download_button("Export Summary",
+                       summary_image_bytes,
+                       "options_summary.png",
+                       "image/png")
+
 
 st.markdown("---")
 
 # ── 11) In-app YTD summary ─────────────────────────────────────────────────
 st.subheader(f"{current_year} Year-to-Date Summary")
 col1, col2, col3, col4 = st.columns(4)
-col1.metric("YTD Pre-Tax Gain",            f"${ytd:,.1f}")
-col2.metric(f"Tax Expense ({tax_rate_pct}%)", f"-${tax_e:,.1f}")
-col3.metric("YTD Post-Tax Gain",           f"${post_tax:,.1f}")
-col4.metric("Average Monthly Pre-Tax Gain", f"${avg_monthly_pre_tax:,.1f}")
+col1.metric("YTD Pre-Tax Gain",             f"${ytd:,.1f}")
+col2.metric("YTD Post-Tax Gain",            f"${post_tax:,.1f}")
+col3.metric("Average Monthly Pre-Tax Gain", f"${avg_monthly_pre_tax:,.1f}")
+col4.metric("Annualized Run Rate",          f"${annualized:,.1f}")
 
 st.markdown("---")
 
@@ -593,9 +582,9 @@ display = pd.DataFrame({
 })
 
 def highlight_row(row):
-    if row["Action"] == "Sell to Open":
+    if row["Action"] in ("Sell to Open", "Sell to Close"):
         return ["background-color: #233723"] * len(row)
-    if row["Action"] == "Buy to Close":
+    if row["Action"] in ("Buy to Close", "Buy to Open"):
         return ["background-color: #431B1D"] * len(row)
     return ["background-color: #4E3B1E"] * len(row)
 
