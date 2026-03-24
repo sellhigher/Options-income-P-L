@@ -44,7 +44,7 @@ with st.container():
     """
     <div class="centered">
         <div class="welcome-title">
-            Welcome to<br>Options Income P&L
+            Options Income<br>P&L
         </div>
     </div>
     """,
@@ -62,7 +62,7 @@ with col2:
 if not uploaded:
     # small creator credit at very bottom of landing page
     st.markdown(
-        '<p style="text-align: center; color: #888888; font-size: 12px; margin-top: 10px;">'
+        '<p style="text-align: center; color: #888888; font-size: 14px; margin-top: 10px;">'
         'Created by Justin Zhao'
         '</p>',
         unsafe_allow_html=True
@@ -105,10 +105,13 @@ def process(df):
 df   = pd.read_csv(uploaded)
 opts = process(df)
 
-# ── 5) Settings expander ─────────────────────────────────────────────
-with st.expander("Tax Rate Setting", expanded=False):
-    tax_rate_pct = st.slider("Effective Tax Rate (%)", 30, 50, 36, 1)
-    tax_rate     = tax_rate_pct / 100.0
+# ── 5) Controls row: defined early so tax_rate feeds all calculations ─────
+ctrl1, _spacer, ctrl2, ctrl3 = st.columns([1, 2, 1, 1], gap="small")
+with ctrl1:
+    tax_rate_pct = st.number_input(
+        "All-In Tax Rate (%)", min_value=1, max_value=100, value=36, step=1
+    )
+tax_rate = tax_rate_pct / 100.0
 
 # ── 6) Compute open vs closed positions ───────────────────────────────────
 def signed_qty(row):
@@ -264,10 +267,10 @@ def create_summary_image(opts_df, chart_df, month_order, tax_rate, tax_rate_pct)
     date_str = today.strftime(f"%B {today.day}{suf}, %Y")
 
     left_data = [
-        ["YTD Pre-Tax Gain",             f"${ytd:,.1f}"],
-        ["YTD Post-Tax Gain",            f"${post_tax:,.1f}"],
-        ["Average Monthly Pre-Tax Gain", f"${avg_monthly_pre_tax:,.1f}"],
-        ["Annualized Run Rate (Estimate)",          f"${annualized:,.1f}"],
+        ["YTD Pre-Tax Gain",             f"${ytd/1000:,.0f}K"],
+        ["YTD Post-Tax Gain",            f"${post_tax/1000:,.0f}K"],
+        ["Average Monthly Pre-Tax Gain", f"${avg_monthly_pre_tax/1000:,.0f}K"],
+        ["Annualized Run Rate",          f"${annualized/1000:,.0f}K"],
     ]
 
     df2 = chart_df.set_index('MonthLabel').reindex(month_order)
@@ -278,16 +281,15 @@ def create_summary_image(opts_df, chart_df, month_order, tax_rate, tax_rate_pct)
     period_str = f"{completed_labels[0]} – {completed_labels[-1]}" if completed_labels else ""
 
     right_data = [
-        ["Total Pre-Tax Gain in Period",        f"${total_period:,.1f}"],
-        ["Avg. Monthly Pre-Tax Gain in Period", f"${avg_period:,.1f}"]
+        ["Total Pre-Tax Gain in Period",        f"${total_period/1000:,.0f}K"],
+        ["Avg. Monthly Pre-Tax Gain in Period", f"${avg_period/1000:,.0f}K"]
     ]
 
     axL = fig.add_axes([0.05, 0.78, 0.45, 0.17])
     axL.axis('off')
     tblL = axL.table(
         cellText=[
-            ["Year-to-Date Income Summary", ""],
-            [f"({date_str})", ""],
+            [f"Year-to-Date Income Summary", date_str],
             *left_data
         ],
         colWidths=[0.65, 0.35],
@@ -301,9 +303,10 @@ def create_summary_image(opts_df, chart_df, month_order, tax_rate, tax_rate_pct)
         cell.set_linewidth(1)
     for (r, c), cell in tblL.get_celld().items():
         if r == 0:
-            cell.set_text_props(ha='center', va='center', fontfamily='Times New Roman', fontweight='bold')
-        elif r == 1:
-            cell.set_text_props(ha='center', va='center', fontfamily='Times New Roman', fontweight='normal')
+            if c == 0:
+                cell.set_text_props(ha='left', va='center', fontfamily='Times New Roman', fontweight='bold')
+            else:
+                cell.set_text_props(ha='center', va='center', fontfamily='Times New Roman', fontweight='normal')
         else:
             cell.set_text_props(ha=('left' if c == 0 else 'center'), fontfamily='Times New Roman', va='center')
 
@@ -311,8 +314,7 @@ def create_summary_image(opts_df, chart_df, month_order, tax_rate, tax_rate_pct)
     axR.axis('off')
     tblR = axR.table(
         cellText=[
-            ["Monthly Pre-Tax P&L", ""],
-            [f"({period_str})", ""],
+            ["Monthly Pre-Tax P&L", period_str],
             *right_data
         ],
         colWidths=[0.65, 0.35],
@@ -326,9 +328,10 @@ def create_summary_image(opts_df, chart_df, month_order, tax_rate, tax_rate_pct)
         cell.set_linewidth(1)
     for (r, c), cell in tblR.get_celld().items():
         if r == 0:
-            cell.set_text_props(ha='center', va='center', fontfamily='Times New Roman', fontweight='bold')
-        elif r == 1:
-            cell.set_text_props(ha='center', va='center', fontfamily='Times New Roman', fontweight='normal')
+            if c == 0:
+                cell.set_text_props(ha='left', va='center', fontfamily='Times New Roman', fontweight='bold')
+            else:
+                cell.set_text_props(ha='center', va='center', fontfamily='Times New Roman', fontweight='normal')
         else:
             cell.set_text_props(ha=('left' if c == 0 else 'center'), va='center', fontfamily='Times New Roman')
 
@@ -351,7 +354,7 @@ def create_summary_image(opts_df, chart_df, month_order, tax_rate, tax_rate_pct)
         ax2.text(
             bar.get_x() + bar.get_width()/2,
             h/2,
-            f"${h/1000:,.1f}K",
+            f"${h/1000:,.0f}K",
             ha='center', va='center',
             color=(current_text if is_cur else outline_color),
             fontfamily='Times New Roman',
@@ -379,14 +382,18 @@ def create_summary_image(opts_df, chart_df, month_order, tax_rate, tax_rate_pct)
 # ── 9b) Generate summary image bytes ──────────────────────────────────────
 summary_image_bytes = create_summary_image(opts, chart_df, month_order, tax_rate, tax_rate_pct)
 
-# ── 10) Download buttons ──────────────────────────────────────────────────
-c1, c2 = st.columns(2, gap="small")
-with c1:
+# ── 10) Fill export buttons into the controls row ─────────────────────────
+st.markdown("""
+    <style>
+      div[data-testid="stDownloadButton"] { margin-top: 24px; }
+    </style>
+""", unsafe_allow_html=True)
+with ctrl2:
     st.download_button("Export to Excel",
                        excel_bytes,
                        "options_pnl.xlsx",
                        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-with c2:
+with ctrl3:
     st.download_button("Export Summary",
                        summary_image_bytes,
                        "options_summary.png",
@@ -396,10 +403,10 @@ st.markdown("---")
 # ── 11) In-app YTD summary ─────────────────────────────────────────────────
 st.subheader(f"{current_year} Year-to-Date Summary")
 col1, col2, col3, col4 = st.columns(4)
-col1.metric("YTD Pre-Tax Gain",             f"${ytd:,.1f}")
-col2.metric("YTD Post-Tax Gain",            f"${post_tax:,.1f}")
-col3.metric("Average Monthly Pre-Tax Gain", f"${avg_monthly_pre_tax:,.1f}")
-col4.metric("Annualized Run Rate (Estimate)",          f"${annualized:,.1f}")
+col1.metric("YTD Pre-Tax Gain",             f"${ytd/1000:,.0f}K")
+col2.metric("YTD Post-Tax Gain",            f"${post_tax/1000:,.0f}K")
+col3.metric("Average Monthly Pre-Tax Gain", f"${avg_monthly_pre_tax/1000:,.0f}K")
+col4.metric("Annualized Run Rate (Estimate)", f"${annualized/1000:,.0f}K")
 
 st.markdown("---")
 
@@ -455,7 +462,7 @@ labels = (
     alt.Chart(chart_df)
        .transform_calculate(
            mid="datum.PreTaxProfit / 2",
-           k=" '$' + format(datum.PreTaxProfit/1000, '.1f') + 'K'"
+           k=" '$' + format(datum.PreTaxProfit/1000, ',.0f') + 'K'"
        )
        .mark_text(align="center", baseline="middle", fontSize=16, fontWeight="normal")
        .encode(
@@ -476,30 +483,33 @@ avg_line = (
        .encode(y="avg:Q")
 )
 
+phantom_month = "Monthly Avg."
+month_order_ext = month_order + [phantom_month]
+
 label_bg = (
     alt.Chart(pd.DataFrame({
-        "MonthLabel": [month_order[-1]],
+        "MonthLabel": [phantom_month],
         "avg": [chart_avg]
     }))
     .mark_rect(width=120, height=25, fill="black", stroke="white", strokeWidth=1)
     .encode(
-        x=alt.X("MonthLabel:N", sort=month_order),
+        x=alt.X("MonthLabel:N", sort=month_order_ext),
         y=alt.Y("avg:Q")
     )
 )
 
 avg_label = (
     alt.Chart(pd.DataFrame({
-        "MonthLabel": [month_order[-1]],
+        "MonthLabel": [phantom_month],
         "avg": [chart_avg],
-        "label": ["Monthly Avg."]
+        "label": [phantom_month]
     }))
     .mark_text(align="center", baseline="middle",
                dx=0, dy=-1,
                font="Arial", fontWeight="normal", fontStyle="italic",
-               fontSize=16, color="white")
+               fontSize=14, color="white")
     .encode(
-        x=alt.X("MonthLabel:N", sort=month_order),
+        x=alt.X("MonthLabel:N", sort=month_order_ext),
         y=alt.Y("avg:Q"),
         text=alt.Text("label:N")
     )
@@ -530,12 +540,12 @@ col_avg, col_total = st.columns(2)
 with col_avg:
     st.metric(
         f"Average Monthly Pre-Tax Gain in Period ({date_range})",
-        f"${avg_period:,.1f}"
+        f"${avg_period/1000:,.0f}K"
     )
 with col_total:
     st.metric(
         f"Total Pre-Tax Gain in Period ({date_range})",
-        f"${total_period:,.1f}"
+        f"${total_period/1000:,.0f}K"
     )
 
 st.markdown("---")
