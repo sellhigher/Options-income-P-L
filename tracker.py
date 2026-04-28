@@ -73,7 +73,7 @@ if not uploaded:
 st.title("Options P&L Summary")
 
 # ── 4) CSV parsing & cleaning ──────────────────────────────────────────────
-SPREAD_TICKERS = {'SPXW', 'NDX', 'SPY'}
+SPREAD_TICKERS = {'SPXW', 'NDX', 'SPY', 'QQQ'}
 
 def process(df):
     opts = df[df['Description'].str.startswith(('PUT','CALL'))].copy()
